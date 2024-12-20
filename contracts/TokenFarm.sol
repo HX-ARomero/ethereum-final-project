@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: MIT
  * @title Proportional Token Farm
  * @notice Una granja de staking donde las recompensas se distribuyen proporcionalmente al total stakeado.
+ * @author Ariel Romero
  */
 pragma solidity ^0.8.18;
 
@@ -19,11 +20,18 @@ contract TokenFarm {
     uint256 public totalStakingBalance; // Total de tokens en staking
 
     address[] public stakers;
-    mapping(address => uint256) public stakingBalance;
-    mapping(address => uint256) public checkpoints;
-    mapping(address => uint256) public pendingRewards;
-    mapping(address => bool) public hasStaked;
-    mapping(address => bool) public isStaking;
+
+    // Estructura para almacenar la información de staking de un usuario
+    struct StakingInfo {
+        uint256 stakingBalance;
+        uint256 checkpoint;
+        uint256 pendingRewards;
+        bool hasStaked;
+        bool isStaking;
+    }
+
+    // Reemplazar los mappings por la estructura StakingInfo
+    mapping(address => StakingInfo) public stakingInfo;
 
     // Eventos
     event Deposit(address indexed user, uint256 amount);
@@ -38,9 +46,14 @@ contract TokenFarm {
         owner = msg.sender;
     }
 
-    // Modificador para restringir acceso al owner
+    // Modificadores
+    modifier onlyStaking() {
+        require(stakingInfo[msg.sender].isStaking, "You are not staking");
+        _;
+    }
+
     modifier onlyOwner() {
-        require(msg.sender == owner, "Solo el owner puede ejecutar esta funcion");
+        require(msg.sender == owner, "Only owner can execute this function");
         _;
     }
 
@@ -49,24 +62,24 @@ contract TokenFarm {
      * @param _amount Cantidad de tokens LP a depositar.
      */
     function deposit(uint256 _amount) external {
-        require(_amount > 0, "El monto debe ser mayor a 0");
+        require(_amount > 0, "Amount must be greater than 0");
 
         // Transferir tokens LP del usuario a este contrato.
         lpToken.transferFrom(msg.sender, address(this), _amount);
 
-        // Actualizar el balance de staking del usuario en stakingBalance.
-        stakingBalance[msg.sender] += _amount;
+        // Actualizar el balance de staking del usuario en stakingInfo.
+        stakingInfo[msg.sender].stakingBalance += _amount;
         totalStakingBalance += _amount;
 
-        if (!hasStaked[msg.sender]) {
+        if (!stakingInfo[msg.sender].hasStaked) {
             stakers.push(msg.sender);
-            hasStaked[msg.sender] = true;
+            stakingInfo[msg.sender].hasStaked = true;
         }
 
-        isStaking[msg.sender] = true;
+        stakingInfo[msg.sender].isStaking = true;
 
-        if (checkpoints[msg.sender] == 0) {
-            checkpoints[msg.sender] = block.number;
+        if (stakingInfo[msg.sender].checkpoint == 0) {
+            stakingInfo[msg.sender].checkpoint = block.number;
         }
 
         // Calcular y distribuir recompensas para el usuario actual.
@@ -77,18 +90,17 @@ contract TokenFarm {
     /**
      * @notice Retira todos los tokens LP del staking.
      */
-    function withdraw() external {
-        require(isStaking[msg.sender], "No tienes tokens en staking");
-        uint256 balance = stakingBalance[msg.sender];
-        require(balance > 0, "Tu balance es 0");
+    function withdraw() external onlyStaking {
+        uint256 balance = stakingInfo[msg.sender].stakingBalance;
+        require(balance > 0, "Your balance is 0");
 
         // Calcular y distribuir las recompensas antes del retiro.
         distributeRewards(msg.sender);
 
-        // Restablecer el balance del usuario en stakingBalance.
-        stakingBalance[msg.sender] = 0;
+        // Restablecer el balance del usuario en stakingInfo.
+        stakingInfo[msg.sender].stakingBalance = 0;
         totalStakingBalance -= balance;
-        isStaking[msg.sender] = false;
+        stakingInfo[msg.sender].isStaking = false;
 
         // Transferir los tokens LP de vuelta al usuario.
         lpToken.transfer(msg.sender, balance);
@@ -98,12 +110,12 @@ contract TokenFarm {
     /**
      * @notice Reclama las recompensas acumuladas.
      */
-    function claimRewards() external {
-        uint256 pendingAmount = pendingRewards[msg.sender];
-        require(pendingAmount > 0, "No tienes recompensas pendientes");
+    function claimRewards() external onlyStaking {
+        uint256 pendingAmount = stakingInfo[msg.sender].pendingRewards;
+        require(pendingAmount > 0, "You have no pending rewards");
 
         // Restablecer recompensas pendientes a cero
-        pendingRewards[msg.sender] = 0;
+        stakingInfo[msg.sender].pendingRewards = 0;
 
         // Transferir tokens de recompensa al usuario
         dappToken.mint(msg.sender, pendingAmount);
@@ -121,7 +133,7 @@ contract TokenFarm {
 
         for (uint256 i = 0; i < stakers.length; i++) {
             address staker = stakers[i];
-            if (isStaking[staker]) {
+            if (stakingInfo[staker].isStaking) {
                 totalRewards += distributeRewards(staker);
             }
         }
@@ -135,24 +147,24 @@ contract TokenFarm {
      * @return reward Cantidad de recompensa calculada.
      */
     function distributeRewards(address beneficiary) private returns (uint256) {
-    uint256 lastCheckpoint = checkpoints[beneficiary];
-    if (block.number <= lastCheckpoint || totalStakingBalance == 0) {
-        return 0;
+        uint256 lastCheckpoint = stakingInfo[beneficiary].checkpoint;
+        if (block.number <= lastCheckpoint || totalStakingBalance == 0) {
+            return 0;
+        }
+
+        // Calcular la cantidad de bloques transcurridos desde el último checkpoint
+        uint256 blocksPassed = block.number - lastCheckpoint;
+
+        // Calcular la participación proporcional del usuario
+        uint256 userShare = (stakingInfo[beneficiary].stakingBalance * 1e18) / totalStakingBalance;
+
+        // Calcular la recompensa basada en los bloques pasados y la participación del usuario
+        uint256 reward = (REWARD_PER_BLOCK * blocksPassed * userShare) / 1e18;
+
+        // Actualizar las recompensas pendientes y el checkpoint del usuario
+        stakingInfo[beneficiary].pendingRewards += reward;
+        stakingInfo[beneficiary].checkpoint = block.number;
+
+        return reward;
     }
-
-    // Calcular la cantidad de bloques transcurridos desde el último checkpoint
-    uint256 blocksPassed = block.number - lastCheckpoint;
-
-    // Calcular la participación proporcional del usuario
-    uint256 userShare = (stakingBalance[beneficiary] * 1e18) / totalStakingBalance;
-
-    // Calcular la recompensa basada en los bloques pasados y la participación del usuario
-    uint256 reward = (REWARD_PER_BLOCK * blocksPassed * userShare) / 1e18;
-
-    // Actualizar las recompensas pendientes y el checkpoint del usuario
-    pendingRewards[beneficiary] += reward;
-    checkpoints[beneficiary] = block.number;
-
-    return reward;
-}
 }
